@@ -1,0 +1,92 @@
+name: Scrape Bento4 and Create Pre-release
+
+on:
+  workflow_dispatch: # Permite rodar manualmente
+  schedule:
+    - cron: '0 0 * * 1' # Roda toda segunda-feira à meia-noite
+
+permissions:
+  contents: write
+
+jobs:
+  scrape-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4
+
+      - name: Scrape Download Links
+        id: scraper
+        run: |
+          python <<EOF
+          import requests
+          from bs4 import BeautifulSoup
+          import os
+
+          url = "https://www.bento4.com/downloads/"
+          response = requests.get(url)
+          soup = BeautifulSoup(response.text, 'html.parser')
+
+          # Encontra todos os links que apontam para arquivos binários/SDKs
+          links = []
+          for a in soup.find_all('a', href=True):
+              href = a['href']
+              if '/binaries/' in href and (href.endswith('.zip') or href.endswith('.dmg')):
+                  links.append(href)
+
+          # Filtra e organiza (Exemplo: selecionando os SDKs mais recentes)
+          # Salva em um arquivo para o próximo passo
+          with open('download_urls.txt', 'w') as f:
+              for link in links:
+                  f.write(f"{link}\n")
+          
+          # Tenta extrair a versão do primeiro link encontrado (ex: 1-6-0-641)
+          import re
+          version_match = re.search(r'SDK-(\d+-\d+-\d+-\d+)', links[0])
+          version = version_match.group(1) if version_match else "latest"
+          
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"version={version}\n")
+          EOF
+
+      - name: Download and Rename Binaries
+        run: |
+          mkdir -p dist
+          while IFS= read -r url; do
+            filename=$(basename "$url")
+            
+            # Identifica o sistema para organização
+            if [[ "$filename" == *"win32"* ]]; then
+              new_name="Windows_$filename"
+            elif [[ "$filename" == *"linux"* ]]; then
+              new_name="Linux_$filename"
+            elif [[ "$filename" == *"macosx"* ]]; then
+              new_name="macOS_$filename"
+            else
+              new_name="Generic_$filename"
+            fi
+            
+            echo "Downloading $filename as $new_name..."
+            curl -L "$url" -o "dist/$new_name"
+          done < download_urls.txt
+
+      - name: Create Pre-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: "bento4-${{ steps.scraper.outputs.version }}"
+        run: |
+          gh release create "$TAG_NAME" \
+            dist/* \
+            --title "Bento4 Binaries (${{ steps.scraper.outputs.version }})" \
+            --notes "Arquivos binários automáticos do Bento4. Organizados por prefixo de sistema." \
+            --prerelease
+
